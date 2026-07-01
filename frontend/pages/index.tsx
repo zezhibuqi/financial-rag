@@ -11,9 +11,10 @@ import {
   Space,
 } from "antd";
 import { SearchOutlined } from "@ant-design/icons";
+import ReactMarkdown from "react-markdown";
 
 const { Search } = Input;
-const { Text, Paragraph } = Typography;
+const { Text } = Typography;
 
 interface Source {
   doc_name: string;
@@ -134,9 +135,9 @@ export default function Home() {
           style={{ marginTop: 24 }}
           styles={{ body: { padding: "16px 24px" } }}
         >
-          <Paragraph style={{ fontSize: 16, lineHeight: 1.8, whiteSpace: "pre-wrap" }}>
-            {answer}
-          </Paragraph>
+          <div style={{ fontSize: 16, lineHeight: 1.8 }}>
+            <ReactMarkdown>{answer}</ReactMarkdown>
+          </div>
         </Card>
       )}
 
