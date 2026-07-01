@@ -13,11 +13,25 @@
 import os
 import re
 import sys
+import time
 
 import pdfplumber
 from dotenv import load_dotenv
 from supabase import create_client
 from sentence_transformers import SentenceTransformer
+
+
+def supabase_execute_with_retry(operation, max_retries=5):
+    """带重试的 Supabase 操作，处理间歇性网络错误。"""
+    for attempt in range(1, max_retries + 1):
+        try:
+            return operation.execute()
+        except Exception as e:
+            if attempt == max_retries:
+                raise
+            wait = 2 ** attempt
+            print(f"    网络错误（第{attempt}次重试，等待{wait}s）: {e}")
+            time.sleep(wait)
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # ---------------------------------------------------------------------------
@@ -178,7 +192,7 @@ def table_to_markdown(table) -> str:
     return '\n'.join(lines)
 
 
-def split_large_table(md: str, max_chars: int = 1024) -> list:
+def split_large_table(md: str, max_chars: int = 1024, _depth: int = 0) -> list:
     """
     若表格 Markdown 超过 max_chars 字符，按行切半（保留表头）。
     每半部分作为一个独立 chunk。
@@ -187,18 +201,26 @@ def split_large_table(md: str, max_chars: int = 1024) -> list:
         return [md]
 
     lines = md.split('\n')
-    header = lines[:2]  # 表头 + 分隔行
+    if len(lines) <= 2:
+        # 只剩表头+分隔行，无法再切，直接截断
+        return [md[:max_chars]]
 
-    mid = (len(lines) - 2) // 2 + 2
-    first_half = header + lines[2:mid]
-    second_half = header + lines[mid:]
+    if _depth > 5:
+        # 防止无限递归，直接按字符截断
+        return [md[:max_chars]]
+
+    header = lines[:2]  # 表头 + 分隔行
+    data_lines = lines[2:]
+    mid = max(1, len(data_lines) // 2)
+
+    first_half = header + data_lines[:mid]
+    second_half = header + data_lines[mid:]
 
     parts = []
     for half in [first_half, second_half]:
         part_md = '\n'.join(half)
         if len(part_md) > max_chars:
-            # 递归切分
-            parts.extend(split_large_table(part_md, max_chars))
+            parts.extend(split_large_table(part_md, max_chars, _depth + 1))
         else:
             parts.append(part_md)
     return parts
@@ -302,9 +324,11 @@ def main():
 
         # ---- 幂等写入 ----
         print(f"  写入 Supabase ...")
-        supabase.table('chunks').delete().eq('doc_name', filename).execute()
+        supabase_execute_with_retry(
+            supabase.table('chunks').delete().eq('doc_name', filename)
+        )
 
-        for i in range(0, len(all_chunks), 100):
+        for i in range(0, len(all_chunks), 50):
             batch = [
                 {
                     "doc_name": filename,
@@ -315,9 +339,12 @@ def main():
                     "content": all_chunks[j][0],
                     "embedding": embeddings[j].tolist(),
                 }
-                for j in range(i, min(i + 100, len(all_chunks)))
+                for j in range(i, min(i + 50, len(all_chunks)))
             ]
-            supabase.table("chunks").insert(batch).execute()
+            supabase_execute_with_retry(
+                supabase.table("chunks").insert(batch)
+            )
+            time.sleep(0.5)  # 避免触发 Supabase 限流
 
         print(f"  {filename} 写入完成！\n")
 
