@@ -76,7 +76,7 @@ def chat():
     try:
         result = supabase.rpc('match_chunks', {
             'query_embedding': question_emb,
-            'match_count': 4,
+            'match_count': 10,
             'filter_company': company or None,
             'filter_year': year or None,
         }).execute()
@@ -89,17 +89,50 @@ def chat():
             "sources": [],
         })
 
+    # ---- 2b. 关键词补充：利润类问题无条件补充分词检索 ----
+    import re as _re
+    profit_keywords_in_question = any(kw in question for kw in ['利润', '净利润'])
+    if profit_keywords_in_question:
+        try:
+            keyword_year = year
+            if keyword_year is None:
+                year_match = _re.search(r'(\d{4})\s*年', question)
+                if year_match:
+                    keyword_year = int(year_match.group(1))
+
+            existing_ids = {r.get('id') for r in result.data}
+            # 确定要搜索的公司列表
+            companies_to_search = [company] if company else ['茅台', '宁德时代']
+
+            for kw in ['净利润', '利润总额']:
+                for comp in companies_to_search:
+                    query = supabase.table('chunks').select('*').eq('company', comp)
+                    if keyword_year:
+                        query = query.eq('year', keyword_year)
+                    kw_chunks = query.like('content', f'%{kw}%').limit(2).execute()
+                    for c in (kw_chunks.data or []):
+                        if c.get('id') not in existing_ids:
+                            existing_ids.add(c['id'])
+                            c['similarity'] = 1.0
+                            result.data.append(c)
+        except Exception:
+            pass
+
     # ---- 3. 组装 Prompt ----
     chunks_text = '\n---\n'.join(r['content'] for r in result.data)
     prompt = (
-        '你是一个财报分析助手。请根据以下财报片段回答问题，'
-        '若片段中无明确答案，请直接说"未在资料中找到"。\n'
-        '---片段开始---\n'
-        f'{chunks_text}\n'
-        '---片段结束---\n'
-        f'问题：{question}\n'
-        '回答（仅基于片段，不要外延）：'
-    )
+    '你是一个专业的财报分析助手。你的任务是基于提供的财报片段，尽可能准确地回答用户问题。\n\n'
+    '回答要求：\n'
+    '1. 优先从片段中提取具体数字和原文表述来回答\n'
+    '2. 如果片段中有相关数据但不完全匹配问题，请给出最接近的数据并说明来源\n'
+    '3. 只有当片段中完全没有与问题相关的任何信息时，才回答"未在资料中找到相关信息"\n'
+    '4. 回答中引用具体数字时，注明出自哪个报表项目\n\n'
+    '---财报片段---\n'
+    f'{chunks_text}\n'
+    '---片段结束---\n\n'
+    f'问题：{question}\n\n'
+    '回答（基于以上片段）：'
+)
 
     # ---- 4. 生成回答 ----
     try:
