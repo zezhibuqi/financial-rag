@@ -9,6 +9,7 @@ import {
   message,
   Typography,
   Space,
+  Button,
 } from "antd";
 import { SearchOutlined } from "@ant-design/icons";
 import ReactMarkdown from "react-markdown";
@@ -19,6 +20,7 @@ const { Text } = Typography;
 interface Source {
   doc_name: string;
   page: number;
+  content: string;
   snippet: string;
   similarity: number;
 }
@@ -30,6 +32,7 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [answer, setAnswer] = useState<string | null>(null);
   const [sources, setSources] = useState<Source[]>([]);
+  const [expandedSources, setExpandedSources] = useState<Set<number>>(new Set());
 
   const [companies, setCompanies] = useState<string[]>([]);
   const [years, setYears] = useState<number[]>([]);
@@ -55,6 +58,7 @@ export default function Home() {
     setLoading(true);
     setAnswer(null);
     setSources([]);
+    setExpandedSources(new Set());
 
     try {
       const resp = await fetch("/api/chat", {
@@ -149,22 +153,44 @@ export default function Home() {
             {
               key: "sources",
               label: `参考来源（${sources.length} 条）`,
-              children: sources.map((s, i) => (
-                <Card
-                  key={i}
-                  size="small"
-                  style={{ marginBottom: 8 }}
-                  title={
-                    <Space>
-                      <Text strong>{s.doc_name}</Text>
-                      <Text type="secondary">第 {s.page} 页</Text>
-                      <Text type="secondary">相似度 {(s.similarity * 100).toFixed(1)}%</Text>
-                    </Space>
-                  }
-                >
-                  <Text>{s.snippet}...</Text>
-                </Card>
-              )),
+              children: sources.map((s, i) => {
+                const expanded = expandedSources.has(i);
+                return (
+                  <Card
+                    key={i}
+                    size="small"
+                    style={{ marginBottom: 8 }}
+                    title={
+                      <Space>
+                        <Text strong>{s.doc_name}</Text>
+                        <Text type="secondary">第 {s.page} 页</Text>
+                        <Text type="secondary">相似度 {(s.similarity * 100).toFixed(1)}%</Text>
+                      </Space>
+                    }
+                  >
+                    <Text style={{ whiteSpace: "pre-wrap" }}>
+                      {expanded ? s.content : s.snippet}
+                      {s.content.length > 200 && !expanded && "..."}
+                    </Text>
+                    {s.content.length > 200 && (
+                      <div style={{ marginTop: 8 }}>
+                        <Button
+                          type="link"
+                          size="small"
+                          onClick={() => {
+                            const next = new Set(expandedSources);
+                            if (expanded) next.delete(i);
+                            else next.add(i);
+                            setExpandedSources(next);
+                          }}
+                        >
+                          {expanded ? "收起" : "展开全文"}
+                        </Button>
+                      </div>
+                    )}
+                  </Card>
+                );
+              }),
             },
           ]}
         />

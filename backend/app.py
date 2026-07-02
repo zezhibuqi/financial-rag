@@ -149,6 +149,7 @@ def chat():
         {
             "doc_name": r['doc_name'],
             "page": r['page'],
+            "content": r['content'],
             "snippet": r['content'][:200],
             "similarity": round(r['similarity'], 4),
         }
