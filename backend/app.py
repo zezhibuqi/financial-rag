@@ -56,9 +56,10 @@ RERANK_URL = f'{EMBEDDING_API_BASE}/rerank'
 
 def rerank_chunks(query: str, chunks: list, top_n: int = 6) -> list:
     """调用 SiliconFlow Rerank API 对 chunks 重排，返回 top_n 条（带 rerank_score）。"""
-    if len(chunks) <= top_n:
-        for c in chunks:
-            c['rerank_score'] = c.get('similarity', 0)
+    if not chunks:
+        return []
+    if len(chunks) == 1:
+        chunks[0]['rerank_score'] = chunks[0].get('similarity', 0)
         return chunks
 
     documents = [c['content'] for c in chunks]
@@ -69,6 +70,7 @@ def rerank_chunks(query: str, chunks: list, top_n: int = 6) -> list:
             "query": query,
             "documents": documents,
             "return_documents": False,
+            "top_n": min(top_n, len(chunks)),
         },
         headers={
             "Authorization": f"Bearer {EMBEDDING_API_KEY}",
@@ -86,7 +88,7 @@ def rerank_chunks(query: str, chunks: list, top_n: int = 6) -> list:
         chunk['rerank_score'] = r['relevance_score']
         ranked.append(chunk)
 
-    return ranked[:top_n]
+    return ranked[:top_n] if top_n > 0 else ranked
 
 
 # ---------------------------------------------------------------------------
@@ -134,56 +136,104 @@ def chat():
     for r in result.data:
         r['source'] = 'vector'
 
-    # ---- 2b. 关键词补充：利润类问题无条件补充分词检索 ----
-    profit_keywords_in_question = any(kw in question for kw in ['利润', '净利润'])
-    if profit_keywords_in_question:
+    # ---- 2b. 关键词补充：常见财务指标无条件补充分词检索 ----
+    # 映射：用户提问词 → 数据库中实际出现的财务术语
+    FINANCE_KW_MAP = {
+        '利润': ['净利润', '利润总额'],
+        '净利润': ['净利润', '利润总额'],
+        '现金流': ['经营活动产生的现金流量净额', '现金流量'],
+        '毛利率': ['毛利率'],
+        '营收': ['营业收入'],
+        '收入': ['营业收入'],
+        '总资产': ['总资产', '资产总计'],
+        '净资产': ['归属于上市公司股东的净资产', '净资产'],
+        '负债': ['负债合计', '总负债'],
+        '每股收益': ['基本每股收益', '每股收益'],
+        '分红': ['现金分红', '派发现金红利', '利润分配'],
+    }
+
+    triggered_kws = [v for k, v in FINANCE_KW_MAP.items() if k in question]
+    if triggered_kws:
         try:
-            keyword_year = year
-            if keyword_year is None:
-                year_match = _re.search(r'(\d{4})\s*年', question)
-                if year_match:
-                    keyword_year = int(year_match.group(1))
+            # 1. 拍平 + 去重触发词
+            triggered_kws_flat = list({kw for v in triggered_kws for kw in v})
+
+            keyword_years = []
+            if year:
+                keyword_years = [year]
+            else:
+                year_matches = _re.findall(r'(\d{4})\s*年', question)
+                keyword_years = [int(y) for y in year_matches] if year_matches else [None]
+
+            companies_to_search = [company] if company else []
+            if not companies_to_search:
+                if '茅台' in question or '贵州茅台' in question:
+                    companies_to_search = ['茅台']
+                if '宁德' in question:
+                    companies_to_search.append('宁德时代')
+                if not companies_to_search:
+                    companies_to_search = ['茅台', '宁德时代']
 
             existing_ids = {r.get('id') for r in result.data}
-            companies_to_search = [company] if company else ['茅台', '宁德时代']
+            MAX_KW_CHUNKS = 6
+            kw_count = 0
 
-            for kw in ['净利润', '利润总额']:
+            for db_kw in triggered_kws_flat:
+                if kw_count >= MAX_KW_CHUNKS:
+                    break
                 for comp in companies_to_search:
-                    query = supabase.table('chunks').select('*').eq('company', comp)
-                    if keyword_year:
-                        query = query.eq('year', keyword_year)
-                    kw_chunks = query.like('content', f'%{kw}%').limit(2).execute()
-                    for c in (kw_chunks.data or []):
-                        if c.get('id') not in existing_ids:
-                            existing_ids.add(c['id'])
-                            c['source'] = 'keyword'
-                            c['similarity'] = 0
-                            result.data.append(c)
+                    if kw_count >= MAX_KW_CHUNKS:
+                        break
+                    for kw_year in keyword_years:
+                        if kw_count >= MAX_KW_CHUNKS:
+                            break
+                        query = supabase.table('chunks').select('*').eq('company', comp)
+                        if kw_year:
+                            query = query.eq('year', kw_year)
+                        kw_chunks = query.like('content', f'%{db_kw}%').limit(2).execute()
+                        for c in (kw_chunks.data or []):
+                            if c.get('id') not in existing_ids:
+                                existing_ids.add(c['id'])
+                                c['source'] = 'keyword'
+                                c['similarity'] = 0
+                                result.data.append(c)
+                                kw_count += 1
+                                if kw_count >= MAX_KW_CHUNKS:
+                                    break
         except Exception:
             pass
 
-    # ---- 3. Rerank（向量 Chunk 精排，关键词 Chunk 全部保留） ----
-    vector_chunks = [r for r in result.data if r.get('source') == 'vector']
-    keyword_chunks = [r for r in result.data if r.get('source') == 'keyword']
+    # ---- 3. Rerank（全量 → 向量 top-4 + 关键词 best-2 混合精排） ----
+    all_chunks = []
+    seen = set()
+    for r in result.data:
+        if r['id'] not in seen:
+            seen.add(r['id'])
+            all_chunks.append(r)
 
     try:
-        ranked_vector = rerank_chunks(question, vector_chunks, top_n=4)
+        all_ranked = rerank_chunks(question, all_chunks, top_n=len(all_chunks) + 50)
     except Exception:
-        ranked_vector = vector_chunks[:4]
-        for c in ranked_vector:
+        all_ranked = sorted(all_chunks, key=lambda x: x.get('similarity', 0), reverse=True)
+        for c in all_ranked:
             c['rerank_score'] = c.get('similarity', 0)
 
-    # 关键词 Chunk 直接保留（表格财务数据 Reranker 不擅长评分）
-    for c in keyword_chunks:
-        c['rerank_score'] = 1.0  # 关键词精确匹配
+    # 分别取：向量 top-4 + 关键词每公司 best-2（按真实 rerank_score，保证两家公司数据覆盖）
+    vector_ranked = [c for c in all_ranked if c.get('source') == 'vector'][:4]
+    ranked = list(vector_ranked)
 
-    # 合并: rerank top-4 + 全部关键词 Chunk，去重
-    seen_ids = {c['id'] for c in ranked_vector}
-    ranked = list(ranked_vector)
-    for c in keyword_chunks:
-        if c['id'] not in seen_ids:
-            seen_ids.add(c['id'])
-            ranked.append(c)
+    # 关键词 Chunk：每家已出现的公司至少保留 2 条
+    company_kw_count = {}
+    for c in all_ranked:
+        if c.get('source') != 'keyword':
+            continue
+        comp = c.get('company', '__unknown__')
+        if company_kw_count.get(comp, 0) >= 2:
+            continue
+        company_kw_count[comp] = company_kw_count.get(comp, 0) + 1
+        ranked.append(c)
+        if len(ranked) >= 8:
+            break
 
     # ---- 4. 组装 Prompt ----
     chunks_text = ''
