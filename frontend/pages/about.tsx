@@ -17,14 +17,20 @@ export default function About() {
           2023-2025 年度报告进行自然语言问答。
         </Paragraph>
 
+        <Paragraph>
+          RAG 管线：向量检索 + 关键词补充 → 去重 → bge-reranker-v2-m3 精排 → DeepSeek 生成。
+        </Paragraph>
+
         <Descriptions column={1} bordered size="small" style={{ marginTop: 24 }}>
           <Descriptions.Item label="前端">
             <Tag>Next.js 14</Tag>
             <Tag>Ant Design</Tag>
+            <Tag>react-markdown</Tag>
             <Tag>TypeScript</Tag>
           </Descriptions.Item>
           <Descriptions.Item label="后端">
             <Tag>Python Flask</Tag>
+            <Tag>Vercel Serverless</Tag>
           </Descriptions.Item>
           <Descriptions.Item label="数据库">
             <Tag>Supabase</Tag>
@@ -35,6 +41,10 @@ export default function About() {
           </Descriptions.Item>
           <Descriptions.Item label="Embedding">
             <Tag>bge-large-zh-v1.5</Tag>
+            <Tag>SiliconFlow</Tag>
+          </Descriptions.Item>
+          <Descriptions.Item label="Reranker">
+            <Tag>bge-reranker-v2-m3</Tag>
             <Tag>SiliconFlow</Tag>
           </Descriptions.Item>
           <Descriptions.Item label="PDF 解析">
