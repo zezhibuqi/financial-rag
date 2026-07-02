@@ -9,6 +9,8 @@ Flask 后端 —— 财报智能问答系统 RAG 核心链路
 
 import os
 import sys
+import re as _re
+import requests
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -47,6 +49,45 @@ embedding_client = OpenAI(
     api_key=EMBEDDING_API_KEY,
     base_url=EMBEDDING_API_BASE,
 )
+
+RERANK_MODEL = 'BAAI/bge-reranker-v2-m3'
+RERANK_URL = f'{EMBEDDING_API_BASE}/rerank'
+
+
+def rerank_chunks(query: str, chunks: list, top_n: int = 6) -> list:
+    """调用 SiliconFlow Rerank API 对 chunks 重排，返回 top_n 条（带 rerank_score）。"""
+    if len(chunks) <= top_n:
+        for c in chunks:
+            c['rerank_score'] = c.get('similarity', 0)
+        return chunks
+
+    documents = [c['content'] for c in chunks]
+    resp = requests.post(
+        RERANK_URL,
+        json={
+            "model": RERANK_MODEL,
+            "query": query,
+            "documents": documents,
+            "return_documents": False,
+        },
+        headers={
+            "Authorization": f"Bearer {EMBEDDING_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        timeout=15,
+    )
+    resp.raise_for_status()
+    results = resp.json().get('results', [])
+
+    ranked = []
+    for r in results:
+        idx = r['index']
+        chunk = chunks[idx].copy()
+        chunk['rerank_score'] = r['relevance_score']
+        ranked.append(chunk)
+
+    return ranked[:top_n]
+
 
 # ---------------------------------------------------------------------------
 # POST /api/chat
@@ -89,8 +130,11 @@ def chat():
             "sources": [],
         })
 
+    # 标记向量检索的来源
+    for r in result.data:
+        r['source'] = 'vector'
+
     # ---- 2b. 关键词补充：利润类问题无条件补充分词检索 ----
-    import re as _re
     profit_keywords_in_question = any(kw in question for kw in ['利润', '净利润'])
     if profit_keywords_in_question:
         try:
@@ -101,7 +145,6 @@ def chat():
                     keyword_year = int(year_match.group(1))
 
             existing_ids = {r.get('id') for r in result.data}
-            # 确定要搜索的公司列表
             companies_to_search = [company] if company else ['茅台', '宁德时代']
 
             for kw in ['净利润', '利润总额']:
@@ -113,13 +156,42 @@ def chat():
                     for c in (kw_chunks.data or []):
                         if c.get('id') not in existing_ids:
                             existing_ids.add(c['id'])
-                            c['similarity'] = 1.0
+                            c['source'] = 'keyword'
+                            c['similarity'] = 0
                             result.data.append(c)
         except Exception:
             pass
 
-    # ---- 3. 组装 Prompt ----
-    chunks_text = '\n---\n'.join(r['content'] for r in result.data)
+    # ---- 3. Rerank（向量 Chunk 精排，关键词 Chunk 全部保留） ----
+    vector_chunks = [r for r in result.data if r.get('source') == 'vector']
+    keyword_chunks = [r for r in result.data if r.get('source') == 'keyword']
+
+    try:
+        ranked_vector = rerank_chunks(question, vector_chunks, top_n=4)
+    except Exception:
+        ranked_vector = vector_chunks[:4]
+        for c in ranked_vector:
+            c['rerank_score'] = c.get('similarity', 0)
+
+    # 关键词 Chunk 直接保留（表格财务数据 Reranker 不擅长评分）
+    for c in keyword_chunks:
+        c['rerank_score'] = 1.0  # 关键词精确匹配
+
+    # 合并: rerank top-4 + 全部关键词 Chunk，去重
+    seen_ids = {c['id'] for c in ranked_vector}
+    ranked = list(ranked_vector)
+    for c in keyword_chunks:
+        if c['id'] not in seen_ids:
+            seen_ids.add(c['id'])
+            ranked.append(c)
+
+    # ---- 4. 组装 Prompt ----
+    chunks_text = ''
+    for r in ranked:
+        chunks_text += (
+            f'\n--- [{r.get("company", "")} {r.get("year", "")}年报 第{r["page"]}页] ---\n'
+            f'{r["content"]}\n'
+        )
     prompt = (
     '你是一个专业的财报分析助手。你的任务是基于提供的财报片段，尽可能准确地回答用户问题。\n\n'
     '回答要求：\n'
@@ -132,9 +204,9 @@ def chat():
     '---片段结束---\n\n'
     f'问题：{question}\n\n'
     '回答（基于以上片段）：'
-)
+    )
 
-    # ---- 4. 生成回答 ----
+    # ---- 5. 生成回答 ----
     try:
         resp = llm_client.chat.completions.create(
             model=LLM_MODEL,
@@ -144,16 +216,17 @@ def chat():
     except Exception:
         return jsonify({"error": "AI服务暂时不可用，请稍后重试"})
 
-    # ---- 5. 组装 sources ----
+    # ---- 6. 组装 sources ----
     sources = [
         {
             "doc_name": r['doc_name'],
             "page": r['page'],
             "content": r['content'],
             "snippet": r['content'][:200],
-            "similarity": round(r['similarity'], 4),
+            "similarity": round(r.get('rerank_score', r.get('similarity', 0)), 4),
+            "source": r.get('source', 'vector'),
         }
-        for r in result.data
+        for r in ranked
     ]
 
     return jsonify({"answer": answer, "sources": sources})
