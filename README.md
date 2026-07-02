@@ -1,69 +1,86 @@
 # 财报智能问答系统（RAG）
 
-基于 RAG（检索增强生成）技术的财报智能问答系统，支持上传 PDF 财报文档，通过自然语言提问获取带引用的智能回答。
+基于 RAG（检索增强生成）技术的财报智能问答系统，支持贵州茅台和宁德时代 2023-2025 年度报告的自然语言问答。
+
+> 线上地址：https://frontend-sigma-nine-90.vercel.app
 
 ## 技术栈
 
 | 层级 | 技术 |
 |------|------|
-| 前端 | Next.js 14 + Ant Design |
-| 后端 | Python Flask |
+| 前端 | Next.js 14 + Ant Design + react-markdown |
+| 后端 | Python Flask（本地）/ Vercel Serverless（线上） |
 | 数据库 | Supabase PostgreSQL + pgvector |
 | Embedding | BAAI/bge-large-zh-v1.5（本地 GPU / SiliconFlow API） |
-| LLM | 混元 / DeepSeek API |
+| Reranker | BAAI/bge-reranker-v2-m3（SiliconFlow API） |
+| LLM | DeepSeek API |
 | PDF 解析 | pdfplumber |
+| 部署 | Vercel |
 
 ## 快速开始
 
-### 1. 环境要求
+### 环境要求
 
 - Python 3.10+
 - Node.js 18+
 - CUDA GPU（可选，用于本地 Embedding）
 
-### 2. 后端部署
+### 1. 后端
 
 ```bash
-# 创建虚拟环境并安装依赖
+cd backend
 python -m venv venv
-venv\Scripts\activate  # Windows
-pip install flask flask-cors supabase pdfplumber sentence-transformers langchain-text-splitters openai python-dotenv
-
-# 配置环境变量（复制 .env.example 并填写密钥）
-cp .env.example .env
+venv\Scripts\activate
+pip install flask flask-cors supabase openai python-dotenv requests
+python app.py  # → http://localhost:5000
 ```
 
-### 3. 前端部署
+### 2. 前端
 
 ```bash
 cd frontend
 npm install
-npm run dev
+npm run dev  # → http://localhost:3000
 ```
 
-### 4. 离线数据灌库
+### 3. 离线数据灌库
 
 ```bash
-python ingest.py --pdf path/to/report.pdf
+# 将 PDF 放入 backend/pdfs/ 目录，然后运行：
+python backend/ingest.py
 ```
 
-## 系统架构
+## RAG 管线
 
 ```
-前端（Next.js） → 后端（Flask） → Supabase（pgvector 检索） → LLM（生成回答）
-                      ↑
-                离线预处理（PDF解析 → 切片 → Embedding → 入库）
+Query → Embedding → 向量检索(k=10) + 关键词补充
+       → 去重 → Rerank → 向量top-4 + 关键词per-company best-2
+       → Prompt → DeepSeek → {answer, sources}
 ```
 
-## 功能特性
+## API 接口
 
-- PDF 财报文档上传与管理
-- 自然语言智能问答
-- 回答附带引用来源（公司、年份、页码）
-- 支持按公司、年份筛选
-- 本地 GPU 加速 Embedding（可选）
+| Method | Path | 说明 |
+|--------|------|------|
+| POST | `/api/chat` | RAG 问答 |
+| POST | `/api/upload` | PDF 上传 |
+| GET | `/api/docs` | 已入库年报列表 + 筛选选项 |
 
-## 文档
+详见 [api.md](./api.md)
 
-- [项目设计文档](./项目设计文档.md) — 架构设计、技术选型、数据库设计
-- [项目实施文档](./项目实施文档.md) — 分阶段开发指南
+## 项目文档
+
+- [项目设计文档](./项目设计文档.md)
+- [项目实施文档](./项目实施文档.md)
+- [API 接口文档](./api.md)
+
+## 测试
+
+```bash
+python backend/test/test_chat_single.py    # 单公司查询
+python backend/test/test_chat_cross.py     # 跨公司比较
+python backend/test/test_cashflow.py       # 现金流查询
+python backend/test/test_dividend.py       # 分红查询
+python backend/test/test_revenue.py        # 营收对比
+python backend/test/golden_set.py          # Golden Set 验收
+```

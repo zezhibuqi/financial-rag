@@ -17,6 +17,8 @@ import ReactMarkdown from "react-markdown";
 const { Search } = Input;
 const { Text } = Typography;
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "https://backend-liard-pi-99.vercel.app";
+
 interface Source {
   doc_name: string;
   page: number;
@@ -39,7 +41,7 @@ export default function Home() {
 
   // 加载筛选选项
   useEffect(() => {
-    fetch("/api/docs")
+    fetch(`${API_BASE}/api/docs`)
       .then((r) => r.json())
       .then((d) => {
         if (d.companies) setCompanies(d.companies);
@@ -61,7 +63,7 @@ export default function Home() {
     setExpandedSources(new Set());
 
     try {
-      const resp = await fetch("/api/chat", {
+      const resp = await fetch(`${API_BASE}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question: q, company, year }),

@@ -19,9 +19,11 @@ from supabase import create_client
 from openai import OpenAI
 
 # ---------------------------------------------------------------------------
-# 加载环境变量
+# 加载环境变量（本地开发用 .env，Vercel 上走系统环境变量）
 # ---------------------------------------------------------------------------
-load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
+env_path = os.path.join(os.path.dirname(__file__), '..', '.env')
+if os.path.exists(env_path):
+    load_dotenv(env_path)
 
 SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_ANON_KEY = os.getenv('SUPABASE_ANON_KEY')
@@ -31,6 +33,18 @@ LLM_MODEL = os.getenv('LLM_MODEL', 'deepseek-v4-flash')
 EMBEDDING_API_KEY = os.getenv('EMBEDDING_API_KEY')
 EMBEDDING_API_BASE = os.getenv('EMBEDDING_API_BASE')
 EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL', 'BAAI/bge-large-zh-v1.5')
+
+# 验证必要环境变量
+for _key, _name in [
+    (SUPABASE_URL, 'SUPABASE_URL'),
+    (SUPABASE_ANON_KEY, 'SUPABASE_ANON_KEY'),
+    (LLM_API_KEY, 'LLM_API_KEY'),
+    (LLM_API_BASE, 'LLM_API_BASE'),
+    (EMBEDDING_API_KEY, 'EMBEDDING_API_KEY'),
+    (EMBEDDING_API_BASE, 'EMBEDDING_API_BASE'),
+]:
+    if not _key:
+        raise RuntimeError(f'缺少环境变量: {_name}')
 
 # ---------------------------------------------------------------------------
 # 初始化客户端
@@ -175,17 +189,17 @@ def chat():
                     companies_to_search = ['茅台', '宁德时代']
 
             existing_ids = {r.get('id') for r in result.data}
-            MAX_KW_CHUNKS = 6
-            kw_count = 0
+            MAX_KW_CHUNKS_PER_COMPANY = 4
+            kw_count = {}
+            for comp in companies_to_search:
+                kw_count[comp] = 0
 
             for db_kw in triggered_kws_flat:
-                if kw_count >= MAX_KW_CHUNKS:
-                    break
                 for comp in companies_to_search:
-                    if kw_count >= MAX_KW_CHUNKS:
-                        break
+                    if kw_count[comp] >= MAX_KW_CHUNKS_PER_COMPANY:
+                        continue
                     for kw_year in keyword_years:
-                        if kw_count >= MAX_KW_CHUNKS:
+                        if kw_count[comp] >= MAX_KW_CHUNKS_PER_COMPANY:
                             break
                         query = supabase.table('chunks').select('*').eq('company', comp)
                         if kw_year:
@@ -197,8 +211,8 @@ def chat():
                                 c['source'] = 'keyword'
                                 c['similarity'] = 0
                                 result.data.append(c)
-                                kw_count += 1
-                                if kw_count >= MAX_KW_CHUNKS:
+                                kw_count[comp] += 1
+                                if kw_count[comp] >= MAX_KW_CHUNKS_PER_COMPANY:
                                     break
         except Exception:
             pass

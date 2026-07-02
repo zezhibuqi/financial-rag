@@ -12,13 +12,15 @@ interface DocRecord {
   uploaded_at: string;
 }
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "https://backend-liard-pi-99.vercel.app";
+
 export default function Manage() {
   const [data, setData] = useState<DocRecord[]>([]);
   const [loading, setLoading] = useState(false);
 
   const fetchDocs = () => {
     setLoading(true);
-    fetch("/api/docs")
+    fetch(`${API_BASE}/api/docs`)
       .then((r) => r.json())
       .then((d) => {
         if (d.error) {
