@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>财报智能问答系统 - 架构审查报告</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+    <style>
+        .mermaid { text-align: center; }
+        .badge-strong { background: #dc2626; color: white; }
+        .badge-worth { background: #f59e0b; color: white; }
+        .badge-speculative { background: #6b7280; color: white; }
+        .card { border: 1px solid #e5e7eb; border-radius: 0.5rem; padding: 1.5rem; margin-bottom: 1.5rem; background: white; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .card h3 { font-size: 1.25rem; font-weight: 600; margin-bottom: 0.5rem; }
+        .section-title { font-size: 0.875rem; font-weight: 600; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 1rem; margin-bottom: 0.5rem; }
+        .diagram-container { background: #f9fafb; border-radius: 0.375rem; padding: 1rem; margin: 1rem 0; }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+    <div class="max-w-5xl mx-auto px-4 py-8">
+        <header class="mb-8">
+            <h1 class="text-3xl font-bold text-gray-900">财报智能问答系统 - 架构审查报告</h1>
+            <p class="text-gray-600 mt-2">基于 improve-codebase-architecture 的深度分析</p>
+            <p class="text-sm text-gray-500 mt-1">生成时间: 2026-07-13</p>
+        </header>
+
+        <section class="mb-8">
+            <h2 class="text-xl font-semibold text-gray-800 mb-3">领域模型概览</h2>
+            <div class="diagram-container">
+                <pre class="mermaid">
+graph LR
+    A[年报 Annual Report] -->|解析为| B[Chunk]
+    A -->|属于| C[公司 Company]
+    A -->|对应| D[财务年度 Fiscal Year]
+    B -->|向量化| E[Embedding 1024维]
+    B -->|存储于| F[(chunks 表)]
+    G[灌库 Ingestion] -->|离线批处理| F
+    H[上传 Upload] -->|仅暂存| I[Supabase Storage]
+                </pre>
+            </div>
+            <p class="text-sm text-gray-600 mt-2">核心实体: Chunk（最小检索单元）、年报、公司（简称）、财务年度。灌库与上传分离（ADR-0001）。</p>
+        </section>
+
+        <section class="mb-8">
+            <h2 class="text-xl font-semibold text-gray-800 mb-3">架构改进候选</h2>
+            <p class="text-gray-600 mb-4">以下按推荐强度排序，从最值得探索的开始。</p>
+
+            <!-- Candidate 1 -->
+            <div class="card">
+                <div class="flex items-center justify-between mb-2">
+                    <h3>1. RAG 管线提取为深度模块</h3>
+                    <span class="badge-strong px-2 py-1 rounded text-xs font-medium">Strong</span>
+                </div>
+                <div class="section-title">Files</div>
+                <p class="text-sm text-gray-700"><code>backend/app.py</code> (380行) — <code>/api/chat</code> 路由函数包含完整 RAG 管线</p>
+
+                <div class="section-title">Problem</div>
+                <p class="text-sm text-gray-700">当前 <code>chat()</code> 函数是一个浅模块：接口（HTTP 路由）和实现（RAG 管线逻辑）紧耦合。约 180 行的 RAG 逻辑（Embedding、向量检索、关键词补充、Rerank、Prompt 组装、LLM 生成）直接内联在路由函数中。这导致：</p>
+                <ul class="text-sm text-gray-700 list-disc list-inside mt-2 space-y-1">
+                    <li><strong>可测试性差</strong>：无法独立测试 RAG 管线，必须启动 Flask 服务器</li>
+                    <li><strong>复用性差</strong>：如果未来需要 CLI 工具或批量处理，RAG 逻辑无法复用</li>
+                    <li><strong>认知负荷高</strong>：理解 <code>/api/chat</code> 需要同时理解 HTTP 层和 RAG 领域</li>
+                </ul>
+
+                <div class="section-title">Solution</div>
+                <p class="text-sm text-gray-700">提取 <code>RAGPipeline</code> 类或 <code>rag.py</code> 模块，封装完整的检索-增强-生成流程。接口简化为 <code>answer(question, company?, year?) -> {answer, sources}</code>。HTTP 路由只负责参数解析和响应序列化。</p>
+
+                <div class="section-title">Before / After</div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div class="diagram-container">
+                        <p class="text-xs text-gray-500 mb-2 text-center">Before: 浅路由</p>
+                        <pre class="mermaid">
+graph TB
+    A[HTTP Route /api/chat] -->|包含| B[Embedding 调用]
+    A -->|包含| C[向量检索]
+    A -->|包含| D[关键词补充]
+    A -->|包含| E[Rerank]
+    A -->|包含| F[Prompt 组装]
+    A -->|包含| G[LLM 生成]
+                        </pre>
+                    </div>
+                    <div class="diagram-container">
+                        <p class="text-xs text-gray-500 mb-2 text-center">After: 深度模块</p>
+                        <pre class="mermaid">
+graph TB
+    A[HTTP Route /api/chat] -->|调用| B[RAGPipeline]
+    B -->|封装| C[Embedding]
+    B -->|封装| D[检索策略]
+    B -->|封装| E[Rerank]
+    B -->|封装| F[生成]
+    G[CLI / 测试] -->|调用| B
+                        </pre>
+                    </div>
+                </div>
+
+                <div class="section-title">Benefits</div>
+                <ul class="text-sm text-gray-700 list-disc list-inside space-y-1">
+                    <li><strong>Locality</strong>：RAG 逻辑变更集中在 <code>rag.py</code>，HTTP 层稳定</li>
+                    <li><strong>Leverage</strong>：测试可直接调用 <code>RAGPipeline.answer()</code>，无需 HTTP 开销</li>
+                    <li><strong>Deletion test</strong>：删除 <code>rag.py</code> 后，HTTP 路由变成空壳，证明它是复杂性的集中点</li>
+                </ul>
+            </div>
+
+            <!-- Candidate 2 -->
+            <div class="card">
+                <div class="flex items-center justify-between mb-2">
+                    <h3>2. 关键词补充逻辑提取为领域模块</h3>
+                    <span class="badge-strong px-2 py-1 rounded text-xs font-medium">Strong</span>
+                </div>
+                <div class="section-title">Files</div>
+                <p class="text-sm text-gray-700"><code>backend/app.py</code> 第 153-219 行 — <code>FINANCE_KW_MAP</code> 和关键词检索逻辑</p>
+
+                <div class="section-title">Problem</div>
+                <p class="text-sm text-gray-700">关键词补充是财报领域的核心知识（9 类财务指标映射），但直接硬编码在路由函数中。这导致：</p>
+                <ul class="text-sm text-gray-700 list-disc list-inside mt-2 space-y-1">
+                    <li><strong>领域知识散落</strong>：财务指标映射是领域概念，不应与 HTTP 逻辑混在一起</li>
+                    <li><strong>难以演进</strong>：新增指标类型需要修改路由函数，而非独立的领域模块</li>
+                    <li><strong>无法独立测试</strong>：关键词触发逻辑、公司提取逻辑无法单独验证</li>
+                </ul>
+
+                <div class="section-title">Solution</div>
+                <p class="text-sm text-gray-700">提取 <code>keyword_supplement.py</code> 模块，接口为 <code>supplement(question, vector_results) -> list[Chunk]</code>。内部封装 <code>FINANCE_KW_MAP</code>、公司/年份提取、Supabase LIKE 查询。</p>
+
+                <div class="section-title">Before / After</div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div class="diagram-container">
+                        <p class="text-xs text-gray-500 mb-2 text-center">Before: 内联逻辑</p>
+                        <pre class="mermaid">
+graph LR
+    A[chat 函数] -->|内联| B[FINANCE_KW_MAP]
+    A -->|内联| C[公司提取]
+    A -->|内联| D[LIKE 查询]
+                        </pre>
+                    </div>
+                    <div class="diagram-container">
+                        <p class="text-xs text-gray-500 mb-2 text-center">After: 领域模块</p>
+                        <pre class="mermaid">
+graph LR
+    A[chat 函数] -->|调用| B[keyword_supplement]
+    B -->|封装| C[FINANCE_KW_MAP]
+    B -->|封装| D[公司提取]
+    B -->|封装| E[LIKE 查询]
+                        </pre>
+                    </div>
+                </div>
+
+                <div class="section-title">Benefits</div>
+                <ul class="text-sm text-gray-700 list-disc list-inside space-y-1">
+                    <li><strong>Locality</strong>：财务指标映射变更集中在 <code>keyword_supplement.py</code></li>
+                    <li><strong>Testability</strong>：可独立测试"给定问题'茅台利润'，应触发哪些关键词"</li>
+                    <li><strong>领域对齐</strong>：与 CONTEXT.md 的"Chunk"、"公司"等概念对齐</li>
+                </ul>
+            </div>
+
+            <!-- Candidate 3 -->
+            <div class="card">
+                <div class="flex items-center justify-between mb-2">
+                    <h3>3. 前端 API Client 统一</h3>
+                    <span class="badge-worth px-2 py-1 rounded text-xs font-medium">Worth exploring</span>
+                </div>
+                <div class="section-title">Files</div>
+                <p class="text-sm text-gray-700"><code>frontend/pages/index.tsx</code>, <code>frontend/pages/manage.tsx</code> — 分散的 fetch 调用</p>
+
+                <div class="section-title">Problem</div>
+                <p class="text-sm text-gray-700">两个页面各自硬编码 <code>API_BASE</code> 和 fetch 逻辑。如果后端地址变更，需要修改多处。错误处理（<code>message.error</code>）也重复。</p>
+
+                <div class="section-title">Solution</div>
+                <p class="text-sm text-gray-700">提取 <code>lib/api.ts</code> 模块，导出 <code>chat(question, company?, year?)</code>、<code>getDocs()</code>、<code>upload(file)</code> 等函数。统一错误处理和类型定义。</p>
+
+                <div class="section-title">Before / After</div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div class="diagram-container">
+                        <p class="text-xs text-gray-500 mb-2 text-center">Before: 分散调用</p>
+                        <pre class="mermaid">
+graph TB
+    A[index.tsx] -->|fetch| B[/api/chat]
+    A -->|fetch| C[/api/docs]
+    D[manage.tsx] -->|fetch| C
+    D -->|fetch| E[/api/upload]
+                        </pre>
+                    </div>
+                    <div class="diagram-container">
+                        <p class="text-xs text-gray-500 mb-2 text-center">After: 统一 Client</p>
+                        <pre class="mermaid">
+graph TB
+    A[index.tsx] -->|调用| B[lib/api.ts]
+            D[manage.tsx] -->|调用| B
+    B -->|封装| C[/api/chat]
+    B -->|封装| D[/api/docs]
+    B -->|封装| E[/api/upload]
+                        </pre>
+                    </div>
+                </div>
+
+                <div class="section-title">Benefits</div>
+                <ul class="text-sm text-gray-700 list-disc list-inside space-y-1">
+                    <li><strong>Locality</strong>：API 地址变更只需修改 <code>lib/api.ts</code></li>
+                    <li><strong>Type safety</strong>：统一的 TypeScript 类型定义</li>
+                    <li><strong>Deletion test</strong>：删除 <code>lib/api.ts</code> 后，页面无法调用后端，证明它是必要的抽象</li>
+                </ul>
+            </div>
+
+            <!-- Candidate 4 -->
+            <div class="card">
+                <div class="flex items-center justify-between mb-2">
+                    <h3>4. ingest.py 的 process_pdf 返回值重构</h3>
+                    <span class="badge-speculative px-2 py-1 rounded text-xs font-medium">Speculative</span>
+                </div>
+                <div class="section-title">Files</div>
+                <p class="text-sm text-gray-700"><code>backend/ingest.py</code> 第 229-281 行 — <code>process_pdf</code> 函数</p>
+
+                <div class="section-title">Problem</div>
+                <p class="text-sm text-gray-700"><code>process_pdf</code> 返回 <code>(all_chunks, company, year, filename)</code> 四元组。调用者（<code>main</code> 函数第 312-313 行）需要记住位置：<code>all_chunks, company, year, filename = result</code>。这是浅接口。</p>
+
+                <div class="section-title">Solution</div>
+                <p class="text-sm text-gray-700">返回 <code>IngestResult</code> dataclass 或 dict：<code>{chunks, company, year, doc_name}</code>。调用者通过属性名访问，而非位置。</p>
+
+                <div class="section-title">Benefits</div>
+                <ul class="text-sm text-gray-700 list-disc list-inside space-y-1">
+                    <li><strong>可读性</strong>：<code>result.chunks</code> 比 <code>result[0]</code> 更清晰</li>
+                    <li><strong>扩展性</strong>：新增字段（如 <code>warnings</code>）不破坏调用者</li>
+                </ul>
+            </div>
+
+            <!-- Candidate 5 -->
+            <div class="card">
+                <div class="flex items-center justify-between mb-2">
+                    <h3>5. 测试基础设施统一</h3>
+                    <span class="badge-speculative px-2 py-1 rounded text-xs font-medium">Speculative</span>
+                </div>
+                <div class="section-title">Files</div>
+                <p class="text-sm text-gray-700"><code>backend/test/*.py</code> — 9 个测试脚本</p>
+
+                <div class="section-title">Problem</div>
+                <p class="text-sm text-gray-700">每个测试脚本都独立构造 HTTP 请求、解析响应、打印结果。重复代码多，且无法批量运行或生成报告。</p>
+
+                <div class="section-title">Solution</div>
+                <p class="text-sm text-gray-700">提取 <code>test_base.py</code>，提供 <code>run_chat_test(name, body, expect_fn)</code> 辅助函数。<code>golden_set.py</code> 已经是这个方向，可以扩展为通用框架。</p>
+
+                <div class="section-title">Benefits</div>
+                <ul class="text-sm text-gray-700 list-disc list-inside space-y-1">
+                    <li><strong>Locality</strong>：测试逻辑变更集中在 <code>test_base.py</code></li>
+                    <li><strong>批量运行</strong>：可一键运行所有测试</li>
+                </ul>
+            </div>
+        </section>
+
+        <section class="mb-8 p-4 bg-blue-50 rounded-lg border border-blue-200">
+            <h2 class="text-xl font-semibold text-blue-900 mb-2">Top Recommendation</h2>
+            <p class="text-blue-800 mb-3"><strong>候选 1: RAG 管线提取为深度模块</strong></p>
+            <p class="text-sm text-blue-700">这是最值得优先探索的改进。<code>app.py</code> 的 <code>/api/chat</code> 路由函数承载了过多职责，是典型的"浅模块"——接口（HTTP 路由）和实现（RAG 管线）几乎一样复杂。提取 <code>RAGPipeline</code> 后：</p>
+            <ul class="text-sm text-blue-700 list-disc list-inside mt-2 space-y-1">
+                <li>HTTP 层变成薄适配层，职责清晰</li>
+                <li>RAG 逻辑可独立测试，无需启动 Flask</li>
+                <li>未来扩展（如流式响应、批量处理）有清晰的扩展点</li>
+            </ul>
+            <p class="text-sm text-blue-700 mt-2">这个改进符合"深度模块"原则：一个小的接口（<code>answer()</code>）背后是大量复杂行为。</p>
+        </section>
+
+        <footer class="text-center text-sm text-gray-500 py-4 border-t">
+            <p>本报告由 improve-codebase-architecture 生成 | 领域模型参考 CONTEXT.md | 架构决策参考 docs/adr/</p>
+        </footer>
+    </div>
+
+    <script>
+        mermaid.initialize({ startOnLoad: true, theme: 'default' });
+    </script>
+</body>
+</html>
